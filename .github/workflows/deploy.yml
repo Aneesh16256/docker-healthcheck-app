@@ -33,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Set up Google Cloud SDK with auth plugin
+      - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
         with:
           version: '>= 410.0.0'
@@ -49,14 +49,21 @@ jobs:
           gcloud container clusters get-credentials $GKE_CLUSTER \
             --zone $GKE_ZONE \
             --project ${{ secrets.GCP_PROJECT_ID }}
-          kubectl config use-context gke_${{ secrets.GCP_PROJECT_ID }}_$GKE_ZONE_$GKE_CLUSTER
+          
+          # Verify cluster access
+          kubectl cluster-info
 
       - name: Deploy to GKE
         run: |
-          # Update deployment without deprecated --record flag
+          # Check if deployment exists, create if not
+          if ! kubectl get deployment/$APP_NAME; then
+            kubectl create deployment $APP_NAME --image=$DOCKER_IMAGE:latest
+            kubectl expose deployment $APP_NAME --port=80 --target-port=3000 --type=LoadBalancer
+          fi
+          
+          # Update deployment
           kubectl set image deployment/$APP_NAME $APP_NAME=$DOCKER_IMAGE:$GITHUB_SHA
           kubectl rollout status deployment/$APP_NAME --timeout=3m
-          kubectl apply -f k8s/service.yaml
 
       - name: Verify deployment
         run: |
@@ -68,9 +75,10 @@ jobs:
         if: failure()
         run: |
           echo "🚨 Initiating rollback..."
-          gcloud container clusters get-credentials $GKE_CLUSTER \
-            --zone $GKE_ZONE \
-            --project ${{ secrets.GCP_PROJECT_ID }}
-          kubectl rollout undo deployment/$APP_NAME
-          kubectl rollout status deployment/$APP_NAME
-          echo "✅ Rollback completed successfully"
+          if kubectl get deployment/$APP_NAME; then
+            kubectl rollout undo deployment/$APP_NAME
+            kubectl rollout status deployment/$APP_NAME
+            echo "✅ Rollback completed successfully"
+          else
+            echo "ℹ️ No deployment found to rollback"
+          fi
