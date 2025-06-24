@@ -1,4 +1,4 @@
-name: Deploy to GKE with Health Check & Rollback
+name: Deploy to GKE with Health Check
 
 on:
   push:
@@ -46,9 +46,14 @@ jobs:
             --project ${{ secrets.GCP_PROJECT_ID }}
           kubectl get nodes
 
+      - name: Clean up previous deployment
+        run: |
+          kubectl delete deployment $APP_NAME --ignore-not-found
+          kubectl delete service $APP_NAME --ignore-not-found
+          sleep 10  # Wait for resources to be fully deleted
+
       - name: Deploy to GKE
         run: |
-          # Create deployment with proper health checks
           cat <<EOF > deployment.yaml
           apiVersion: apps/v1
           kind: Deployment
@@ -73,28 +78,28 @@ jobs:
                     httpGet:
                       path: /health
                       port: 3000
-                    initialDelaySeconds: 5
+                    initialDelaySeconds: 30  # Increased delay
                     periodSeconds: 10
                     failureThreshold: 30
                   readinessProbe:
                     httpGet:
                       path: /health
                       port: 3000
-                    initialDelaySeconds: 10
+                    initialDelaySeconds: 5
                     periodSeconds: 5
                   resources:
                     requests:
-                      cpu: "250m"
-                      memory: "256Mi"
+                      cpu: "100m"  # Reduced requests
+                      memory: "128Mi"
           EOF
           
           kubectl apply -f deployment.yaml
           kubectl expose deployment $APP_NAME \
             --port=80 \
             --target-port=3000 \
-            --type=LoadBalancer || echo "Service already exists"
+            --type=LoadBalancer
           
-          kubectl rollout status deployment/$APP_NAME --timeout=5m
+          kubectl rollout status deployment/$APP_NAME --timeout=10m
 
       - name: Verify deployment
         run: |
@@ -102,24 +107,30 @@ jobs:
           kubectl describe pod $POD_NAME
           kubectl logs $POD_NAME
           
-          # Wait for health check to pass
-          for i in {1..10}; do
-            HEALTH_STATUS=$(kubectl exec $POD_NAME -- curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || echo "500")
-            if [ "$HEALTH_STATUS" = "200" ]; then
-              echo "✅ Health check passed"
-              exit 0
-            fi
-            echo "Attempt $i: Health check returned $HEALTH_STATUS"
-            sleep 10
-          done
-          echo "❌ Health check failed after 10 attempts"
-          exit 1
+          # Wait for pod to be ready
+          kubectl wait --for=condition=Ready pod/$POD_NAME --timeout=5m || \
+          (echo "❌ Pod failed to start"; kubectl logs $POD_NAME --previous; exit 1)
+          
+          # Verify health endpoint
+          HEALTH_STATUS=$(kubectl exec $POD_NAME -- curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || echo "500")
+          [ "$HEALTH_STATUS" = "200" ] || (echo "❌ Health check failed: $HEALTH_STATUS"; exit 1)
 
       - name: Debug on failure
         if: failure()
         run: |
-          echo "🛑 Deployment failed - gathering debug info"
+          echo "=== Deployment State ==="
           kubectl get all -l app=$APP_NAME
+          
+          echo "=== Pod Description ==="
           POD_NAME=$(kubectl get pods -l app=$APP_NAME -o jsonpath='{.items[0].metadata.name}')
           kubectl describe pod $POD_NAME
+          
+          echo "=== Current Logs ==="
           kubectl logs $POD_NAME
+          
+          echo "=== Previous Logs ==="
+          kubectl logs $POD_NAME --previous || echo "No previous logs"
+          
+          echo "=== Cluster Events ==="
+          kubectl get events --sort-by=.metadata.creationTimestamp
+          exit 1  # Ensure step fails
