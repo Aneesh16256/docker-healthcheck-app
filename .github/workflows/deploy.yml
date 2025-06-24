@@ -88,6 +88,15 @@ jobs:
         if: failure()
         run: |
           echo "🚨 Initiating rollback..."
-          kubectl rollout undo deployment/$APP_NAME
-          kubectl rollout status deployment/$APP_NAME --timeout=2m
-          echo "✅ Successfully rolled back"
+          
+          # Ensure we have cluster credentials
+          gcloud container clusters get-credentials $GKE_CLUSTER \
+            --zone $GKE_ZONE \
+            --project ${{ secrets.GCP_PROJECT_ID }}
+          
+          # Perform rollback with timeout
+          kubectl rollout undo deployment/$APP_NAME --timeout=60s
+          
+          # Verify rollback
+          kubectl rollout status deployment/$APP_NAME --timeout=60s
+          echo "✅ Rollback completed successfully"
