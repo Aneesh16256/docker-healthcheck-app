@@ -1,23 +1,20 @@
-# Stage 1: Build the application
-FROM node:18-alpine as builder
-
+# Stage 1: Build
+FROM node:18-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
 COPY . .
-RUN npm run build  # If using TypeScript/Webpack/etc.
+RUN npm run build  # Ensure this creates dist/index.js
 
-# Stage 2: Runtime environment
+# Stage 2: Runtime
 FROM node:18-alpine
-
 WORKDIR /app
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/src ./src
+COPY --from=builder /app/dist ./dist  # Make sure this exists
 
-# Health check configuration (checks every 30s, timeout after 10s)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:3000/health || exit 1
+# Alternative if not using dist:
+# COPY --from=builder /app/src ./src
 
 EXPOSE 3000
-CMD ["node", "dist/index.js"]
+CMD ["node", "dist/index.js"]  # Or "src/index.js" if not using dist
