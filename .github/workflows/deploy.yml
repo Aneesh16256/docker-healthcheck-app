@@ -50,35 +50,77 @@ jobs:
             --zone $GKE_ZONE \
             --project ${{ secrets.GCP_PROJECT_ID }}
           
-          # Verify cluster access
+          kubectl config current-context
           kubectl cluster-info
+
+      - name: Debug Cluster Status
+        run: |
+          kubectl get nodes
+          kubectl get deployments
+          kubectl get pods
 
       - name: Deploy to GKE
         run: |
-          # Check if deployment exists, create if not
-          if ! kubectl get deployment/$APP_NAME; then
-            kubectl create deployment $APP_NAME --image=$DOCKER_IMAGE:latest
-            kubectl expose deployment $APP_NAME --port=80 --target-port=3000 --type=LoadBalancer
-          fi
+          # Clean up any previous failed deployment
+          kubectl delete deployment $APP_NAME --ignore-not-found || true
+          kubectl delete service $APP_NAME --ignore-not-found || true
           
-          # Update deployment
-          kubectl set image deployment/$APP_NAME $APP_NAME=$DOCKER_IMAGE:$GITHUB_SHA
-          kubectl rollout status deployment/$APP_NAME --timeout=3m
+          # Create fresh deployment with proper configuration
+          kubectl create deployment $APP_NAME \
+            --image=$DOCKER_IMAGE:$GITHUB_SHA \
+            --dry-run=client -o yaml > deployment.yaml
+          
+          # Add proper health checks and resource limits
+          cat <<EOF >> deployment.yaml
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 3000
+                initialDelaySeconds: 15
+                periodSeconds: 5
+              livenessProbe:
+                httpGet:
+                  path: /health
+                  port: 3000
+                initialDelaySeconds: 30
+                periodSeconds: 10
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "200m"
+                  memory: "256Mi"
+          EOF
+          
+          kubectl apply -f deployment.yaml
+          kubectl expose deployment $APP_NAME \
+            --port=80 \
+            --target-port=3000 \
+            --type=LoadBalancer
+          
+          kubectl rollout status deployment/$APP_NAME --timeout=5m
 
       - name: Verify deployment
         run: |
-          kubectl wait --for=condition=Ready pod -l app=$APP_NAME --timeout=2m
+          kubectl wait --for=condition=Available deployment/$APP_NAME --timeout=5m
           POD_NAME=$(kubectl get pods -l app=$APP_NAME -o jsonpath='{.items[0].metadata.name}')
+          kubectl describe pod $POD_NAME
+          kubectl logs $POD_NAME
           kubectl exec $POD_NAME -- curl -s http://localhost:3000/health
 
       - name: Rollback if deployment fails
         if: failure()
         run: |
           echo "🚨 Initiating rollback..."
-          if kubectl get deployment/$APP_NAME; then
-            kubectl rollout undo deployment/$APP_NAME
-            kubectl rollout status deployment/$APP_NAME
-            echo "✅ Rollback completed successfully"
-          else
-            echo "ℹ️ No deployment found to rollback"
+          kubectl get deployment $APP_NAME -o yaml > deployment-failed.yaml
+          kubectl rollout undo deployment/$APP_NAME
+          kubectl rollout status deployment/$APP_NAME --timeout=5m
+          echo "✅ Rollback completed successfully"
+          
+          # Save logs for debugging
+          POD_NAME=$(kubectl get pods -l app=$APP_NAME -o jsonpath='{.items[0].metadata.name}' || true)
+          if [ -n "$POD_NAME" ]; then
+            kubectl logs $POD_NAME > failed-pod-logs.txt
+            kubectl describe pod $POD_NAME > failed-pod-description.txt
           fi
