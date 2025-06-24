@@ -15,13 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      
-      - name: Build Docker image
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+      - name: Build and push Docker image
         run: |
-          # Ensure proper build output
-          npm install
-          npm run build  # Make sure this creates dist/index.js
-          
           docker build -t $DOCKER_IMAGE:$GITHUB_SHA .
           docker push $DOCKER_IMAGE:$GITHUB_SHA
 
@@ -44,6 +44,13 @@ jobs:
           gcloud container clusters get-credentials $GKE_CLUSTER \
             --zone $GKE_ZONE \
             --project ${{ secrets.GCP_PROJECT_ID }}
+          kubectl get nodes
+
+      - name: Clean up previous deployment
+        run: |
+          kubectl delete deployment $APP_NAME --ignore-not-found
+          kubectl delete service $APP_NAME --ignore-not-found
+          sleep 10  # Wait for resources to be fully deleted
 
       - name: Deploy to GKE
         run: |
@@ -65,18 +72,24 @@ jobs:
                 containers:
                 - name: $APP_NAME
                   image: $DOCKER_IMAGE:$GITHUB_SHA
-                  command: ["node", "src/index.js"]  # Changed from dist/index.js
                   ports:
                   - containerPort: 3000
                   startupProbe:
                     httpGet:
                       path: /health
                       port: 3000
-                    initialDelaySeconds: 10
+                    initialDelaySeconds: 30  # Increased delay
+                    periodSeconds: 10
+                    failureThreshold: 30
+                  readinessProbe:
+                    httpGet:
+                      path: /health
+                      port: 3000
+                    initialDelaySeconds: 5
                     periodSeconds: 5
                   resources:
                     requests:
-                      cpu: "100m"
+                      cpu: "100m"  # Reduced requests
                       memory: "128Mi"
           EOF
           
@@ -86,11 +99,38 @@ jobs:
             --target-port=3000 \
             --type=LoadBalancer
           
-          kubectl rollout status deployment/$APP_NAME --timeout=5m
+          kubectl rollout status deployment/$APP_NAME --timeout=10m
 
       - name: Verify deployment
         run: |
-          kubectl wait --for=condition=Ready pod -l app=$APP_NAME --timeout=5m
           POD_NAME=$(kubectl get pods -l app=$APP_NAME -o jsonpath='{.items[0].metadata.name}')
+          kubectl describe pod $POD_NAME
           kubectl logs $POD_NAME
-          kubectl exec $POD_NAME -- curl -s http://localhost:3000/health
+          
+          # Wait for pod to be ready
+          kubectl wait --for=condition=Ready pod/$POD_NAME --timeout=5m || \
+          (echo "❌ Pod failed to start"; kubectl logs $POD_NAME --previous; exit 1)
+          
+          # Verify health endpoint
+          HEALTH_STATUS=$(kubectl exec $POD_NAME -- curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || echo "500")
+          [ "$HEALTH_STATUS" = "200" ] || (echo "❌ Health check failed: $HEALTH_STATUS"; exit 1)
+
+      - name: Debug on failure
+        if: failure()
+        run: |
+          echo "=== Deployment State ==="
+          kubectl get all -l app=$APP_NAME
+          
+          echo "=== Pod Description ==="
+          POD_NAME=$(kubectl get pods -l app=$APP_NAME -o jsonpath='{.items[0].metadata.name}')
+          kubectl describe pod $POD_NAME
+          
+          echo "=== Current Logs ==="
+          kubectl logs $POD_NAME
+          
+          echo "=== Previous Logs ==="
+          kubectl logs $POD_NAME --previous || echo "No previous logs"
+          
+          echo "=== Cluster Events ==="
+          kubectl get events --sort-by=.metadata.creationTimestamp
+          exit 1  # Ensure step fails
