@@ -5,7 +5,7 @@ on:
     branches: [ main ]
 
 env:
-  DOCKER_IMAGE: ${{ secrets.DOCKER_INB_USERNAME }}/docker-healthcheck-app
+  DOCKER_IMAGE: ${{ secrets.DOCKER_HUB_USERNAME }}/docker-healthcheck-app
   GKE_CLUSTER: test-monitoring
   GKE_ZONE: us-central1-a
   APP_NAME: docker-healthcheck-app
@@ -15,11 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - name: Login to Docker Hub
         uses: docker/login-action@v2
         with:
-          username: ${{ secrets.DOCKER_INB_USERNAME }}
-          password: ${{ secrets.DOCKER_INB_TOKEN }}
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
       - name: Build and push Docker image
         run: |
           docker build -t $DOCKER_IMAGE:$GITHUB_SHA .
@@ -30,43 +32,45 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      
-      - name: Set up Google Cloud SDK
+
+      - name: Set up Google Cloud SDK with auth plugin
         uses: google-github-actions/setup-gcloud@v1
         with:
-          version: '>= 410.0.0'  # Ensures gke-gcloud-auth-plugin is included
+          version: '>= 410.0.0'
           install_components: 'gke-gcloud-auth-plugin'
-      
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v1
         with:
-          credentials_json: ${{ secrets.GCP_CREDRIFTIALS }}
-      
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+
       - name: Configure kubectl
         run: |
-          gcloud components update
           gcloud container clusters get-credentials $GKE_CLUSTER \
             --zone $GKE_ZONE \
             --project ${{ secrets.GCP_PROJECT_ID }}
           kubectl config use-context gke_${{ secrets.GCP_PROJECT_ID }}_$GKE_ZONE_$GKE_CLUSTER
-      
+
       - name: Deploy to GKE
         run: |
-          # Update deployment (removed deprecated --record flag)
+          # Update deployment without deprecated --record flag
           kubectl set image deployment/$APP_NAME $APP_NAME=$DOCKER_IMAGE:$GITHUB_SHA
           kubectl rollout status deployment/$APP_NAME --timeout=3m
           kubectl apply -f k8s/service.yaml
-      
+
       - name: Verify deployment
         run: |
           kubectl wait --for=condition=Ready pod -l app=$APP_NAME --timeout=2m
           POD_NAME=$(kubectl get pods -l app=$APP_NAME -o jsonpath='{.items[0].metadata.name}')
           kubectl exec $POD_NAME -- curl -s http://localhost:3000/health
-      
+
       - name: Rollback if deployment fails
         if: failure()
         run: |
           echo "🚨 Initiating rollback..."
+          gcloud container clusters get-credentials $GKE_CLUSTER \
+            --zone $GKE_ZONE \
+            --project ${{ secrets.GCP_PROJECT_ID }}
           kubectl rollout undo deployment/$APP_NAME
           kubectl rollout status deployment/$APP_NAME
-          echo "✅ Rollback complete!"
+          echo "✅ Rollback completed successfully"
