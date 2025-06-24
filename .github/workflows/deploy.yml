@@ -26,33 +26,36 @@ jobs:
           docker push $DOCKER_IMAGE:$GITHUB_SHA
 
   deploy-to-gke:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    steps:
+      needs: build-and-push
+      runs-on: ubuntu-latest
+      steps:
       - uses: actions/checkout@v3
+      
       - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
         with:
           version: '>= 410.0.0'
           install_components: 'gke-gcloud-auth-plugin'
+      
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v1
         with:
           credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+      
       - name: Configure kubectl
         run: |
           gcloud container clusters get-credentials $GKE_CLUSTER \
             --zone $GKE_ZONE \
             --project ${{ secrets.GCP_PROJECT_ID }}
           kubectl get nodes
-
+  
       - name: Clean up previous deployment
         run: |
           kubectl delete deployment $APP_NAME --ignore-not-found
           kubectl delete service $APP_NAME --ignore-not-found
-          sleep 10  # Wait for resources to be fully deleted
-
-      - name: Deploy to GKE
+          sleep 15  # Increased wait time
+  
+      - name: Deploy to GKE with Health Checks
         run: |
           cat <<EOF > deployment.yaml
           apiVersion: apps/v1
@@ -61,6 +64,10 @@ jobs:
             name: $APP_NAME
           spec:
             replicas: 1
+            strategy:
+              rollingUpdate:
+                maxSurge: 1
+                maxUnavailable: 0
             selector:
               matchLabels:
                 app: $APP_NAME
@@ -78,59 +85,84 @@ jobs:
                     httpGet:
                       path: /health
                       port: 3000
-                    initialDelaySeconds: 30  # Increased delay
-                    periodSeconds: 10
+                    initialDelaySeconds: 5
+                    periodSeconds: 5
                     failureThreshold: 30
                   readinessProbe:
                     httpGet:
                       path: /health
                       port: 3000
-                    initialDelaySeconds: 5
+                    initialDelaySeconds: 10
                     periodSeconds: 5
+                    failureThreshold: 3
+                  livenessProbe:
+                    httpGet:
+                      path: /health
+                      port: 3000
+                    initialDelaySeconds: 15
+                    periodSeconds: 10
                   resources:
                     requests:
-                      cpu: "100m"  # Reduced requests
-                      memory: "128Mi"
+                      cpu: "250m"  # Increased from 100m
+                      memory: "256Mi"  # Increased from 128Mi
           EOF
-          
+  
           kubectl apply -f deployment.yaml
           kubectl expose deployment $APP_NAME \
             --port=80 \
             --target-port=3000 \
-            --type=LoadBalancer
-          
-          kubectl rollout status deployment/$APP_NAME --timeout=10m
-
-      - name: Verify deployment
+            --type=LoadBalancer \
+            --name=$APP_NAME-service
+  
+      - name: Wait for rollout
         run: |
+          # Wait with extended timeout
+          kubectl rollout status deployment/$APP_NAME --timeout=15m
+          
+          # Get pod name
           POD_NAME=$(kubectl get pods -l app=$APP_NAME -o jsonpath='{.items[0].metadata.name}')
-          kubectl describe pod $POD_NAME
-          kubectl logs $POD_NAME
           
           # Wait for pod to be ready
-          kubectl wait --for=condition=Ready pod/$POD_NAME --timeout=5m || \
-          (echo "❌ Pod failed to start"; kubectl logs $POD_NAME --previous; exit 1)
+          kubectl wait --for=condition=Ready pod/$POD_NAME --timeout=5m
           
           # Verify health endpoint
-          HEALTH_STATUS=$(kubectl exec $POD_NAME -- curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || echo "500")
-          [ "$HEALTH_STATUS" = "200" ] || (echo "❌ Health check failed: $HEALTH_STATUS"; exit 1)
-
+          for i in {1..10}; do
+            HEALTH_STATUS=$(kubectl exec $POD_NAME -- curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || echo "500")
+            if [ "$HEALTH_STATUS" = "200" ]; then
+              echo "✅ Health check passed"
+              break
+            fi
+            echo "⏳ Health check attempt $i/10: $HEALTH_STATUS"
+            sleep 10
+          done
+          
+          [ "$HEALTH_STATUS" = "200" ] || (echo "❌ Health check failed"; exit 1)
+  
       - name: Debug on failure
         if: failure()
         run: |
-          echo "=== Deployment State ==="
-          kubectl get all -l app=$APP_NAME
+          echo "=== Cluster State ==="
+          kubectl get all
           
-          echo "=== Pod Description ==="
-          POD_NAME=$(kubectl get pods -l app=$APP_NAME -o jsonpath='{.items[0].metadata.name}')
-          kubectl describe pod $POD_NAME
+          echo "=== Deployment Description ==="
+          kubectl describe deployment $APP_NAME
           
-          echo "=== Current Logs ==="
-          kubectl logs $POD_NAME
+          echo "=== Pods ==="
+          kubectl get pods -l app=$APP_NAME
           
-          echo "=== Previous Logs ==="
-          kubectl logs $POD_NAME --previous || echo "No previous logs"
+          POD_NAME=$(kubectl get pods -l app=$APP_NAME -o jsonpath='{.items[0].metadata.name}' || echo "")
+          if [ -n "$POD_NAME" ]; then
+            echo "=== Pod Description ==="
+            kubectl describe pod $POD_NAME
+            
+            echo "=== Current Logs ==="
+            kubectl logs $POD_NAME
+            
+            echo "=== Previous Logs ==="
+            kubectl logs $POD_NAME --previous || echo "No previous logs"
+          fi
           
-          echo "=== Cluster Events ==="
-          kubectl get events --sort-by=.metadata.creationTimestamp
-          exit 1  # Ensure step fails
+          echo "=== Events ==="
+          kubectl get events --sort-by=.metadata.creationTimestamp | tail -n 20
+          
+          exit 1
