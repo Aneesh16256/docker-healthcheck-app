@@ -15,13 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - name: Login to Docker Hub
         uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
       - name: Build and push Docker image
         run: |
           docker build -t $DOCKER_IMAGE:$GITHUB_SHA .
@@ -32,33 +30,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
         with:
           version: '>= 410.0.0'
           install_components: 'gke-gcloud-auth-plugin'
-
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v1
         with:
           credentials_json: ${{ secrets.GCP_CREDENTIALS }}
-
       - name: Configure kubectl
         run: |
           gcloud container clusters get-credentials $GKE_CLUSTER \
             --zone $GKE_ZONE \
             --project ${{ secrets.GCP_PROJECT_ID }}
-          kubectl config current-context
-          kubectl cluster-info
+          kubectl get nodes
 
       - name: Deploy to GKE
         run: |
-          # Clean up any previous deployment
-          kubectl delete deployment $APP_NAME --ignore-not-found || true
-          kubectl delete service $APP_NAME --ignore-not-found || true
-          
-          # Create properly formatted deployment YAML
+          # Create deployment with proper health checks
           cat <<EOF > deployment.yaml
           apiVersion: apps/v1
           kind: Deployment
@@ -79,63 +69,57 @@ jobs:
                   image: $DOCKER_IMAGE:$GITHUB_SHA
                   ports:
                   - containerPort: 3000
+                  startupProbe:
+                    httpGet:
+                      path: /health
+                      port: 3000
+                    initialDelaySeconds: 5
+                    periodSeconds: 10
+                    failureThreshold: 30
                   readinessProbe:
                     httpGet:
                       path: /health
                       port: 3000
-                    initialDelaySeconds: 15
+                    initialDelaySeconds: 10
                     periodSeconds: 5
-                  livenessProbe:
-                    httpGet:
-                      path: /health
-                      port: 3000
-                    initialDelaySeconds: 30
-                    periodSeconds: 10
                   resources:
                     requests:
-                      cpu: "100m"
-                      memory: "128Mi"
-                    limits:
-                      cpu: "200m"
+                      cpu: "250m"
                       memory: "256Mi"
           EOF
           
-          # Apply deployment and service
           kubectl apply -f deployment.yaml
           kubectl expose deployment $APP_NAME \
             --port=80 \
             --target-port=3000 \
-            --type=LoadBalancer
+            --type=LoadBalancer || echo "Service already exists"
           
           kubectl rollout status deployment/$APP_NAME --timeout=5m
 
       - name: Verify deployment
         run: |
-          kubectl wait --for=condition=Available deployment/$APP_NAME --timeout=5m
           POD_NAME=$(kubectl get pods -l app=$APP_NAME -o jsonpath='{.items[0].metadata.name}')
           kubectl describe pod $POD_NAME
           kubectl logs $POD_NAME
-          kubectl exec $POD_NAME -- curl -s http://localhost:3000/health
+          
+          # Wait for health check to pass
+          for i in {1..10}; do
+            HEALTH_STATUS=$(kubectl exec $POD_NAME -- curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || echo "500")
+            if [ "$HEALTH_STATUS" = "200" ]; then
+              echo "✅ Health check passed"
+              exit 0
+            fi
+            echo "Attempt $i: Health check returned $HEALTH_STATUS"
+            sleep 10
+          done
+          echo "❌ Health check failed after 10 attempts"
+          exit 1
 
-      - name: Rollback if deployment fails
+      - name: Debug on failure
         if: failure()
         run: |
-          echo "🚨 Checking deployment status..."
-          if kubectl get deployment $APP_NAME; then
-            echo "🚨 Initiating rollback..."
-            kubectl rollout undo deployment/$APP_NAME
-            kubectl rollout status deployment/$APP_NAME --timeout=5m || echo "⚠️ Rollback status check failed"
-            echo "✅ Rollback attempted"
-          else
-            echo "ℹ️ No deployment found to rollback"
-          fi
-          
-          # Always save debug information
-          POD_NAME=$(kubectl get pods -l app=$APP_NAME -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-          if [ -n "$POD_NAME" ]; then
-            echo "📝 Saving debug information..."
-            kubectl describe deployment $APP_NAME > deployment-description.txt
-            kubectl logs $POD_NAME > pod-logs.txt
-            kubectl describe pod $POD_NAME > pod-description.txt
-          fi
-          exit 1  # Ensure step fails to mark workflow as failed
+          echo "🛑 Deployment failed - gathering debug info"
+          kubectl get all -l app=$APP_NAME
+          POD_NAME=$(kubectl get pods -l app=$APP_NAME -o jsonpath='{.items[0].metadata.name}')
+          kubectl describe pod $POD_NAME
+          kubectl logs $POD_NAME
