@@ -7,7 +7,7 @@ on:
 env:
   # Environment variables (update these)
   DOCKER_IMAGE: your-dockerhub-username/docker-healthcheck-app
-  GKE_CLUSTER: your-gke-cluster-name  # From GCP Console → Kubernetes Engine
+  GKE_CLUSTER: test-monitoring  # From GCP Console → Kubernetes Engine
   GKE_ZONE: us-central1-a             # Zone where your cluster is located
   APP_NAME: docker-healthcheck-app    # Name for K8s resources
 
