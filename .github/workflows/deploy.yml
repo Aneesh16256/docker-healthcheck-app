@@ -57,62 +57,22 @@ jobs:
   
       - name: Deploy to GKE with Health Checks
         run: |
-          cat <<EOF > deployment.yaml
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: $APP_NAME
-          spec:
-            replicas: 1
-            strategy:
-              rollingUpdate:
-                maxSurge: 1
-                maxUnavailable: 0
-            selector:
-              matchLabels:
-                app: $APP_NAME
-            template:
-              metadata:
-                labels:
-                  app: $APP_NAME
-              spec:
-                containers:
-                - name: $APP_NAME
-                  image: $DOCKER_IMAGE:$GITHUB_SHA
-                  ports:
-                  - containerPort: 3000
-                  startupProbe:
-                    httpGet:
-                      path: /health
-                      port: 3000
-                    initialDelaySeconds: 5
-                    periodSeconds: 5
-                    failureThreshold: 30
-                  readinessProbe:
-                    httpGet:
-                      path: /health
-                      port: 3000
-                    initialDelaySeconds: 10
-                    periodSeconds: 5
-                    failureThreshold: 3
-                  livenessProbe:
-                    httpGet:
-                      path: /health
-                      port: 3000
-                    initialDelaySeconds: 15
-                    periodSeconds: 10
-                  resources:
-                    requests:
-                      cpu: "250m"  # Increased from 100m
-                      memory: "256Mi"  # Increased from 128Mi
-          EOF
-  
           kubectl apply -f deployment.yaml
-          kubectl expose deployment $APP_NAME \
-            --port=80 \
-            --target-port=3000 \
-            --type=LoadBalancer \
-            --name=$APP_NAME-service
+          
+          # Create or update service
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: $APP_NAME-service
+          spec:
+            type: LoadBalancer
+            ports:
+            - port: 80
+              targetPort: 3000
+            selector:
+              app: $APP_NAME
+          EOF
   
       - name: Wait for rollout
         run: |
