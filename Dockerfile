@@ -13,7 +13,7 @@ FROM node:18-alpine
 WORKDIR /app
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/src ./src
 
 # Health check configuration (checks every 30s, timeout after 10s)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
