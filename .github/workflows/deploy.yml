@@ -1,0 +1,76 @@
+name: Deploy to GKE with Health Check & Rollback
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  DOCKER_IMAGE: your-dockerhub-username/docker-healthcheck-app
+  GKE_CLUSTER: your-gke-cluster-name
+  GKE_ZONE: us-central1-a  # Change to your GKE zone
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Build and Push Docker Image
+        run: |
+          docker build -t $DOCKER_IMAGE:$GITHUB_SHA .
+          docker push $DOCKER_IMAGE:$GITHUB_SHA
+          docker tag $DOCKER_IMAGE:$GITHUB_SHA $DOCKER_IMAGE:latest
+          docker push $DOCKER_IMAGE:latest
+
+  deploy-to-gke:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v1
+
+      - name: Configure kubectl
+        run: |
+          gcloud container clusters get-credentials $GKE_CLUSTER \
+            --zone $GKE_ZONE \
+            --project ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Deploy to GKE
+        run: |
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl rollout status deployment/docker-healthcheck-app --timeout=2m
+
+      - name: Verify Health Check
+        run: |
+          # Wait for pods to be ready
+          kubectl wait --for=condition=Ready pod -l app=docker-healthcheck-app --timeout=2m
+
+          # Check health endpoint
+          POD_NAME=$(kubectl get pods -l app=docker-healthcheck-app -o jsonpath='{.items[0].metadata.name}')
+          HEALTH_STATUS=$(kubectl exec $POD_NAME -- curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health)
+
+          if [ "$HEALTH_STATUS" != "200" ]; then
+            echo "❌ Health check failed! Status: $HEALTH_STATUS"
+            exit 1  # This will trigger rollback
+          fi
+
+      - name: Rollback if Health Check Fails
+        if: failure()
+        run: |
+          echo "🚨 Rolling back to previous version..."
+          kubectl rollout undo deployment/docker-healthcheck-app
+          echo "✅ Rollback complete!"

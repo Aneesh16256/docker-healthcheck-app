@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docker-healthcheck-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: docker-healthcheck-app
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: docker-healthcheck-app
+    spec:
+      containers:
+      - name: app
+        image: your-dockerhub-username/docker-healthcheck-app:$GITHUB_SHA
+        ports:
+        - containerPort: 3000
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
