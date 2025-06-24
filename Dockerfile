@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install
 COPY . .
-RUN npm run build  # If using TypeScript/Webpack/etc.
+RUN npm run build  # Generates /app/dist/index.js
 
 # Stage 2: Runtime environment
 FROM node:18-alpine
@@ -13,9 +13,10 @@ FROM node:18-alpine
 WORKDIR /app
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/src ./src
+COPY --from=builder /app/dist ./dist  # ✅ This line is essential
+COPY --from=builder /app/healthcheck.js ./  # Optional if used in healthcheck
 
-# Health check configuration (checks every 30s, timeout after 10s)
+# Health check configuration
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:3000/health || exit 1
 
