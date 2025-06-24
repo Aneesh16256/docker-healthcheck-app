@@ -1,35 +1,50 @@
+cat <<EOF > deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: docker-healthcheck-app
+  name: $APP_NAME
 spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: docker-healthcheck-app
+  replicas: 1
   strategy:
     rollingUpdate:
       maxSurge: 1
       maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: $APP_NAME
   template:
     metadata:
       labels:
-        app: docker-healthcheck-app
+        app: $APP_NAME
     spec:
       containers:
-      - name: app
-        image: your-dockerhub-username/docker-healthcheck-app:$GITHUB_SHA
+      - name: $APP_NAME
+        image: $DOCKER_IMAGE:$GITHUB_SHA
+        imagePullPolicy: Always  # Force fresh image pull
         ports:
         - containerPort: 3000
-        livenessProbe:
+        startupProbe:
           httpGet:
             path: /health
             port: 3000
-          initialDelaySeconds: 10
+          initialDelaySeconds: 30  # Increased from 5
           periodSeconds: 10
+          failureThreshold: 30
         readinessProbe:
           httpGet:
             path: /health
             port: 3000
-          initialDelaySeconds: 5
+          initialDelaySeconds: 15  # Increased from 10
           periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 45  # Increased from 15
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: "500m"  # Increased from 250m
+            memory: "512Mi"  # Increased from 256Mi
+EOF
