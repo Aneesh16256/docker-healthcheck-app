@@ -5,15 +5,18 @@ on:
     branches: [ main ]
 
 env:
+  # Environment variables (update these)
   DOCKER_IMAGE: your-dockerhub-username/docker-healthcheck-app
-  GKE_CLUSTER: your-gke-cluster-name
-  GKE_ZONE: us-central1-a  # Change to your GKE zone
+  GKE_CLUSTER: your-gke-cluster-name  # From GCP Console → Kubernetes Engine
+  GKE_ZONE: us-central1-a             # Zone where your cluster is located
+  APP_NAME: docker-healthcheck-app    # Name for K8s resources
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Login to Docker Hub
         uses: docker/login-action@v2
@@ -21,10 +24,15 @@ jobs:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
-      - name: Build and Push Docker Image
+      - name: Build and push Docker image
         run: |
+          # Build with commit SHA tag
           docker build -t $DOCKER_IMAGE:$GITHUB_SHA .
+          
+          # Push the versioned image
           docker push $DOCKER_IMAGE:$GITHUB_SHA
+          
+          # Also tag and push as 'latest'
           docker tag $DOCKER_IMAGE:$GITHUB_SHA $DOCKER_IMAGE:latest
           docker push $DOCKER_IMAGE:latest
 
@@ -32,7 +40,8 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v1
@@ -50,27 +59,41 @@ jobs:
 
       - name: Deploy to GKE
         run: |
-          kubectl apply -f k8s/deployment.yaml
+          # Update image tag in deployment
+          kubectl set image deployment/$APP_NAME $APP_NAME=$DOCKER_IMAGE:$GITHUB_SHA --record
+          
+          # Wait for rollout to complete
+          kubectl rollout status deployment/$APP_NAME --timeout=3m
+          
+          # Apply service if not exists
           kubectl apply -f k8s/service.yaml
-          kubectl rollout status deployment/docker-healthcheck-app --timeout=2m
 
-      - name: Verify Health Check
+      - name: Verify deployment
         run: |
           # Wait for pods to be ready
-          kubectl wait --for=condition=Ready pod -l app=docker-healthcheck-app --timeout=2m
+          kubectl wait --for=condition=Ready pod -l app=$APP_NAME --timeout=2m
+          
+          # Get pod name
+          POD_NAME=$(kubectl get pods -l app=$APP_NAME -o jsonpath='{.items[0].metadata.name}')
+          
+          # Check health endpoint with retries
+          for i in {1..5}; do
+            HEALTH_STATUS=$(kubectl exec $POD_NAME -- curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || echo "500")
+            if [ "$HEALTH_STATUS" = "200" ]; then
+              echo "✅ Health check passed"
+              exit 0
+            fi
+            echo "⚠️ Attempt $i: Health check failed (Status: $HEALTH_STATUS)"
+            sleep 5
+          done
+          
+          echo "❌ Health check failed after 5 attempts"
+          exit 1
 
-          # Check health endpoint
-          POD_NAME=$(kubectl get pods -l app=docker-healthcheck-app -o jsonpath='{.items[0].metadata.name}')
-          HEALTH_STATUS=$(kubectl exec $POD_NAME -- curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health)
-
-          if [ "$HEALTH_STATUS" != "200" ]; then
-            echo "❌ Health check failed! Status: $HEALTH_STATUS"
-            exit 1  # This will trigger rollback
-          fi
-
-      - name: Rollback if Health Check Fails
+      - name: Rollback if deployment fails
         if: failure()
         run: |
-          echo "🚨 Rolling back to previous version..."
-          kubectl rollout undo deployment/docker-healthcheck-app
-          echo "✅ Rollback complete!"
+          echo "🚨 Initiating rollback..."
+          kubectl rollout undo deployment/$APP_NAME
+          kubectl rollout status deployment/$APP_NAME --timeout=2m
+          echo "✅ Successfully rolled back"
